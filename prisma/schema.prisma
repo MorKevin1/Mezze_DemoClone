@@ -1,0 +1,370 @@
+// Prisma Schema for Mezze
+// Restaurant optimization platform for family-run restaurants
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// MULTI-TENANT: RESTAURANT
+// ============================================
+
+model Restaurant {
+  id            String   @id @default(cuid())
+  name          String
+  slug          String   @unique // URL-friendly name (e.g., "mamas-kitchen")
+  address       String?
+  phone         String?
+  email         String?
+  timezone      String   @default("America/New_York")
+  currency      String   @default("USD")
+
+  // Business settings
+  targetFoodCostPercent   Float    @default(30) // Target food cost % (industry: 28-35%)
+  targetLaborCostPercent  Float    @default(30) // Target labor cost %
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  users              User[]
+  menuCategories     MenuCategory[]
+  menuItems          MenuItem[]
+  ingredients        Ingredient[]
+  vendors            Vendor[]
+  dailySales         DailySales[]
+  reports            Report[]
+  recommendations    Recommendation[]
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+model User {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  name           String?
+  password       String?   // Hashed password
+  image          String?
+  role           UserRole  @default(STAFF)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Restaurant association (multi-tenant)
+  restaurantId   String?
+  restaurant     Restaurant? @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  // NextAuth.js required relations
+  accounts       Account[]
+  sessions       Session[]
+
+  @@index([restaurantId])
+}
+
+enum UserRole {
+  OWNER     // Full access, billing
+  MANAGER   // Can edit menu, view reports
+  STAFF     // Limited access
+}
+
+// NextAuth.js models
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============================================
+// MENU MANAGEMENT
+// ============================================
+
+model MenuCategory {
+  id           String   @id @default(cuid())
+  name         String   // "Appetizers", "Entrees", "Desserts"
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  menuItems    MenuItem[]
+
+  @@index([restaurantId])
+}
+
+model MenuItem {
+  id           String   @id @default(cuid())
+  name         String   // "Chicken Parmesan"
+  description  String?
+  price        Float    // Selling price
+  isActive     Boolean  @default(true)
+  imageUrl     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  categoryId   String?
+  category     MenuCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  // Ingredients that make up this dish
+  ingredients  MenuItemIngredient[]
+
+  // Sales tracking
+  salesRecords DailySalesItem[]
+
+  @@index([restaurantId])
+  @@index([categoryId])
+}
+
+// ============================================
+// INGREDIENTS & COSTS
+// ============================================
+
+model Ingredient {
+  id           String   @id @default(cuid())
+  name         String   // "Chicken Breast"
+  unit         String   // "lb", "oz", "each", "gallon"
+  currentPrice Float    // Current price per unit
+  category     IngredientCategory @default(OTHER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  // Track price changes over time
+  priceHistory IngredientPriceHistory[]
+
+  // Which menu items use this ingredient
+  menuItems    MenuItemIngredient[]
+
+  // Vendor relationships
+  vendorId     String?
+  vendor       Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+
+  @@index([restaurantId])
+  @@index([vendorId])
+}
+
+enum IngredientCategory {
+  PROTEIN
+  PRODUCE
+  DAIRY
+  DRY_GOODS
+  BEVERAGES
+  FROZEN
+  SPICES
+  OTHER
+}
+
+// Junction table: Which ingredients are in which menu items (with quantities)
+model MenuItemIngredient {
+  id           String   @id @default(cuid())
+  quantity     Float    // How much of this ingredient per dish
+  unit         String   // Unit for this quantity (may differ from ingredient's base unit)
+
+  menuItemId   String
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@unique([menuItemId, ingredientId])
+  @@index([menuItemId])
+  @@index([ingredientId])
+}
+
+// Track ingredient price changes over time
+model IngredientPriceHistory {
+  id           String   @id @default(cuid())
+  price        Float    // Price at this point in time
+  recordedAt   DateTime @default(now())
+  source       String?  // "manual", "invoice", "vendor_api"
+
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@index([ingredientId])
+  @@index([recordedAt])
+}
+
+// ============================================
+// VENDORS
+// ============================================
+
+model Vendor {
+  id           String   @id @default(cuid())
+  name         String   // "Sysco", "US Foods", "Local Farm"
+  contactName  String?
+  phone        String?
+  email        String?
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  ingredients  Ingredient[]
+
+  @@index([restaurantId])
+}
+
+// ============================================
+// DAILY SALES & METRICS
+// ============================================
+
+model DailySales {
+  id             String   @id @default(cuid())
+  date           DateTime @db.Date // The business day
+
+  // Revenue
+  totalRevenue   Float    // Total sales for the day
+  foodRevenue    Float?   // Food sales only (excludes drinks, etc.)
+
+  // Costs (can be entered manually or calculated)
+  laborCost      Float?   // Total labor cost for the day
+
+  // Calculated metrics (stored for quick access)
+  foodCostAmount Float?   // Calculated from sales × ingredient costs
+  foodCostPercent Float?  // (foodCostAmount / foodRevenue) × 100
+
+  // Context
+  covers         Int?     // Number of customers served
+  notes          String?  // "Private party", "Holiday weekend", etc.
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  restaurantId   String
+  restaurant     Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  // Breakdown by item (optional, for detailed tracking)
+  items          DailySalesItem[]
+
+  @@unique([restaurantId, date])
+  @@index([restaurantId])
+  @@index([date])
+}
+
+// Optional: Track sales per menu item per day
+model DailySalesItem {
+  id             String   @id @default(cuid())
+  quantitySold   Int      // How many of this item sold
+  revenue        Float    // Total revenue from this item
+
+  dailySalesId   String
+  dailySales     DailySales @relation(fields: [dailySalesId], references: [id], onDelete: Cascade)
+
+  menuItemId     String
+  menuItem       MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  @@unique([dailySalesId, menuItemId])
+  @@index([dailySalesId])
+  @@index([menuItemId])
+}
+
+// ============================================
+// REPORTS
+// ============================================
+
+model Report {
+  id           String     @id @default(cuid())
+  type         ReportType
+  periodStart  DateTime
+  periodEnd    DateTime
+  data         Json       // Flexible JSON for report data
+  sentAt       DateTime?  // When email was sent (null if not sent)
+  createdAt    DateTime   @default(now())
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@index([restaurantId])
+  @@index([createdAt])
+}
+
+enum ReportType {
+  DAILY_SUMMARY
+  WEEKLY_SUMMARY
+  MONTHLY_SUMMARY
+  FOOD_COST_ALERT
+}
+
+// ============================================
+// AI RECOMMENDATIONS
+// ============================================
+
+model Recommendation {
+  id           String              @id @default(cuid())
+  type         RecommendationType
+  title        String              // "Raise price on Chicken Parm"
+  description  String              // "Your margin is 12%, below your 30% target..."
+  impact       String?             // "Could increase monthly profit by $340"
+  priority     Int                 @default(0) // Higher = more important
+  status       RecommendationStatus @default(NEW)
+  dismissedAt  DateTime?
+  appliedAt    DateTime?
+  createdAt    DateTime            @default(now())
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@index([restaurantId])
+  @@index([status])
+}
+
+enum RecommendationType {
+  PRICE_INCREASE
+  PRICE_DECREASE
+  REMOVE_ITEM
+  INGREDIENT_SWAP
+  PORTION_ADJUST
+  VENDOR_SWITCH
+  WASTE_ALERT
+}
+
+enum RecommendationStatus {
+  NEW
+  VIEWED
+  APPLIED
+  DISMISSED
+}
